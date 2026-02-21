@@ -1,0 +1,9 @@
+apify-client
+pandas
+numpy
+spacy
+transformers
+pytrends
+python-dotenv
+SQLAlchemy
+torch

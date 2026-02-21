@@ -1,0 +1,27 @@
+# Environments
+.env
+.env.*
+venv/
+env/
+.venv/
+
+# Python caching
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Database and Logs
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# IDEs
+.vscode/
+.idea/
+*.swp
