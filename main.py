@@ -83,7 +83,7 @@ def run_pipeline(queries: list[str], max_items: int = 10, top_n_save: int = 10):
     df_validation = validator.validate_products(list(all_products))
     
     if df_validation.empty:
-        logger.warning("Pipeline halted: No products passed Google Trends cross-validation.")
+        logger.warning(f"Pipeline halted: 0 products passed Google Trends cross-validation (0 products out of {len(all_products)} had positive 30-day search growth > 0%).")
         return
         
     logger.info(f"-> {len(df_validation)} products passed validation.")

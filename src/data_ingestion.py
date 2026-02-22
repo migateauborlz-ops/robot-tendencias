@@ -44,6 +44,9 @@ class DataIngestion:
             }
             try:
                 run = self.client.actor(self.actor_tiktok_videos).call(run_input=run_input)
+                usage = run.get("usageTotalUsd", 0.0)
+                logger.info(f"Apify Actor '{self.actor_tiktok_videos}' Execution Cost: ${usage:.4f} USD")
+                
                 dataset_items = self.client.dataset(run["defaultDatasetId"]).iterate_items()
                 
                 for item in dataset_items:
@@ -85,6 +88,9 @@ class DataIngestion:
         
         try:
             run = self.client.actor(self.actor_tiktok_comments).call(run_input=run_input)
+            usage = run.get("usageTotalUsd", 0.0)
+            logger.info(f"Apify Actor '{self.actor_tiktok_comments}' Execution Cost: ${usage:.4f} USD")
+            
             dataset_items = self.client.dataset(run["defaultDatasetId"]).iterate_items()
             
             for item in dataset_items:
@@ -117,6 +123,9 @@ class DataIngestion:
             }
             try:
                 run = self.client.actor(self.actor_instagram).call(run_input=run_input)
+                usage = run.get("usageTotalUsd", 0.0)
+                logger.info(f"Apify Actor '{self.actor_instagram}' Execution Cost: ${usage:.4f} USD")
+                
                 dataset_items = self.client.dataset(run["defaultDatasetId"]).iterate_items()
                 
                 for item in dataset_items:

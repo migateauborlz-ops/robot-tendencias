@@ -96,30 +96,124 @@ class NLPLayer:
     def extract_product_entities(self, text: str) -> List[str]:
         """
         Named Entity Recognition (NER) to extract physical product candidates.
-        Uses spaCy's POS tagging and NER to find NOUNs or Noun Phrases.
+        Features Brand & Model extraction, N-Gram compound noun support, and Regex pattern matching.
+        Strict validation ensures rigorous POS checks and limits noise.
         """
         doc = self.nlp(text)
-        products = set()
+        raw_products = set()
         
-        # We look for explicit products using NER labels (PRODUCT)
-        for ent in doc.ents:
-            if ent.label_ == "PRODUCT":
-                products.add(ent.text.lower())
-                
-        # Fallback/Enhancement: Extract Noun Chunks that could be products
-        # We filter out common non-product nouns (e.g., people, time)
-        # In a real scenario, this would have a curated stop-word list
-        excluded_words = {"video", "comment", "tiktok", "instagram", "post", "link", "price"}
+        # 4. Brand Filtering Priority
+        known_brands = {"dyson", "sony", "apple", "nike", "adidas", "samsung", "lg", "bose", "nintendo", "stanley", "ninja"}
+        excluded_words = {
+            "video", "comment", "tiktok", "instagram", "post", "link", "price", "small business", "business", 
+            "everyone", "people", "love", "share", "follow", "cost", "bio", "like", 
+            "lo", "que", "el", "la", "los", "las", "un", "una", "unos", "unas", "uno", 
+            "part", "best", "good", "great", "awesome", "amazing", "yall", "you", "me", "my", "por", "para", "con", "sin"
+        }
         
-        for chunk in doc.noun_chunks:
-            # Basic heuristic: if the root is a noun or proper noun
-            if chunk.root.pos_ in ["NOUN", "PROPN"]:
-                candidate = chunk.text.lower().strip()
-                # Exclude pronouns or single short words, or stop words
-                if len(candidate) > 2 and not any(w in candidate.split() for w in excluded_words):
-                    products.add(candidate)
+        # 3. Pattern Matching Regex
+        model_pattern = re.compile(r'\b(v\d+|pro( max)?|series \d+|gen \d+|edition|airwrap|ultra|plus)\b', re.IGNORECASE)
+        
+        used_tokens = set()
+
+        # 1. Brand & Model Extraction (Merge ORG + PRODUCT within 3 words distance)
+        orgs = [ent for ent in doc.ents if ent.label_ == "ORG"]
+        prods = [ent for ent in doc.ents if ent.label_ == "PRODUCT"]
+        
+        for org in orgs:
+            for prod in prods:
+                distance = abs(org.start - prod.end) if org.start > prod.start else abs(prod.start - org.end)
+                if distance <= 3:
+                    merged = f"{org.text} {prod.text}" if org.start < prod.start else f"{prod.text} {org.text}"
+                    raw_products.add(merged.lower())
+                    used_tokens.update(range(min(org.start, prod.start), max(org.end, prod.end)))
                     
-        return list(products)
+        # Add standalone products if not merged
+        for ent in doc.ents:
+            if ent.label_ == "PRODUCT" and not any(i in used_tokens for i in range(ent.start, ent.end)):
+                raw_products.add(ent.text.lower())
+                used_tokens.update(range(ent.start, ent.end))
+
+        # 2. N-Gram Support & Pattern Matching
+        tokens = [token for token in doc]
+        i = 0
+        while i < len(tokens):
+            if i in used_tokens:
+                i += 1
+                continue
+                
+            # If we find a NOUN, PROPN, or known brand token, start grabbing N-grams
+            if tokens[i].pos_ in ["NOUN", "PROPN"] or tokens[i].text.lower() in known_brands:
+                start = i
+                end = i + 1
+                while end < len(tokens):
+                    t = tokens[end]
+                    text_lower = t.text.lower()
+                    # Allow compound nouns, numbers, or our pattern matches
+                    if t.pos_ in ["NOUN", "PROPN", "NUM"]:
+                        end += 1
+                    elif model_pattern.match(text_lower):
+                        end += 1
+                    else:
+                        break
+                        
+                candidate = doc[start:end].text.lower().strip()
+                
+                # Keep if it's a compound word, OR contains a known brand, OR contains a model pattern
+                if len(candidate.split()) > 1 or any(b in candidate for b in known_brands) or model_pattern.search(candidate):
+                    raw_products.add(candidate)
+                    used_tokens.update(range(start, end))
+                i = end
+            else:
+                i += 1
+
+        # 5. Strict Entity Validation Layer
+        valid_products = set()
+        for p in raw_products:
+            p = p.strip()
+            
+            # Length Constraint: >= 4 chars to avoid tiny noisy words
+            if len(p) < 4:
+                continue
+                
+            # Smart Blacklist: check with word boundaries
+            contains_excluded = False
+            for w in excluded_words:
+                if re.search(r'\b' + re.escape(w) + r'\b', p):
+                    contains_excluded = True
+                    break
+            if contains_excluded:
+                continue
+                
+            # Re-parse the isolated entity to evaluate strict POS rules
+            p_doc = self.nlp(p)
+            if not p_doc or len(p_doc) == 0:
+                continue
+                
+            # Ensure the entity doesn't start with a VERB
+            if p_doc[0].pos_ == "VERB":
+                continue
+                
+            # Contextual Logic: If an entity contains only 1 word and it's an adjective, discard it
+            if len(p_doc) == 1 and p_doc[0].pos_ == "ADJ":
+                continue
+                
+            # Contextual Logic: discard strings starting with numbers unless they are part of a model
+            if p_doc[0].pos_ == "NUM" and len(p_doc) == 1:
+                continue
+                
+            # POS Strictness: Ensure headword (syntactic root) is NOUN or PROPN
+            roots = [t for t in p_doc if t.head == t]
+            if roots:
+                head_pos = roots[0].pos_
+                if head_pos not in ["NOUN", "PROPN"]:
+                    # Allow override only if it explicitly contains a verified global brand
+                    if not any(b in p for b in known_brands):
+                        continue
+                        
+            valid_products.add(p)
+
+        return list(valid_products)
 
     def analyze_purchase_intent(self, comments: List[str]) -> Tuple[float, List[str]]:
         """
@@ -214,15 +308,17 @@ class NLPLayer:
         return pd.DataFrame(results)
 
 if __name__ == "__main__":
+    import sys
+    sys.stdout.reconfigure(encoding='utf-8')
     # Test execution
     try:
         nlp = NLPLayer(sentiment_model="distilbert-base-uncased-finetuned-sst-2-english") # Using default HF model for testing
         test_data = {
-            "platform": ["tiktok"],
-            "video_id": ["7607749319017483551"],
-            "description": ["Check out this amazing LED lamp! 🔥 #viral #tiktokmademebuyit"],
-            "comment_text": ["Where can I buy this? \U0001F60D | I need the link! | trash | how much is the led lamp? | Where can I buy this? \U0001F60D"],
-            "likes_count": [1500]
+            "platform": ["tiktok", "tiktok"],
+            "video_id": ["7607749319017483551", "1234567890"],
+            "description": ["Check out this amazing Sunset Projection Lamp! 🔥 #viral #tiktokmademebuyit", "My new Dyson Airwrap Pro Max is amazing!"],
+            "comment_text": ["Where can I buy this? \U0001F60D | I need the link! | trash | how much is the led lamp? | I love this cost", "follow share video | Airwrap changed my life. | Apple Pro Max version? | link in bio follow me"],
+            "likes_count": [1500, 25000]
         }
         df = pd.DataFrame(test_data)
         

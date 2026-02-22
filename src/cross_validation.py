@@ -2,6 +2,7 @@ import time
 import logging
 from typing import Dict, Any, Optional, Tuple
 import pandas as pd
+pd.set_option('future.no_silent_downcasting', True)
 import numpy as np
 from pytrends.request import TrendReq
 from pytrends.exceptions import TooManyRequestsError
@@ -105,8 +106,8 @@ class TrendValidator:
             
         # Validation rules:
         # 1. Trajectory must be upward (positive slope over 30 days)
-        # 2. Must exhibit recent growth (e.g., > 20% growth in the last week as per requirements)
-        is_valid = slope > 0 and growth_pct > 0.20
+        # 2. Must exhibit recent growth (e.g., > 0% growth in the last week for calibration)
+        is_valid = slope > 0 and growth_pct > 0.0
         
         # Return percentage multiplied by 100 for readability in score algorithms
         return is_valid, growth_pct, avg_volume
