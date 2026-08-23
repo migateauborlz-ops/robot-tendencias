@@ -51,6 +51,14 @@ jobs:
           python -m spacy download es_core_news_sm
           python -m spacy download en_core_web_sm
 
+      - name: Validar los workflows
+        # Este workflow puede validar al otro, pero no a si mismo: si este
+        # archivo fuera invalido, GitHub no lo ejecutaria y el paso nunca
+        # correria. Aun asi cubre el caso que importa, porque pipeline.yml no
+        # se dispara con push y un error suyo solo se manifiesta como una
+        # corrida fallida de cero segundos y sin mensaje.
+        run: python validar_workflows.py
+
       - name: Ejecutar las suites
         run: python ejecutar_pruebas.py
 
