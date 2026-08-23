@@ -25,13 +25,23 @@ jobs:
           cache-dependency-path: requirements.txt
 
       - name: Instalar dependencias
+        # torch se excluye a proposito. Ningun modulo lo importa directamente:
+        # transformers solo lo necesita cuando se instancia NLPLayer para
+        # cargar el modelo de sentimiento, y ninguna prueba lo hace (usan
+        # NLPLayer._intent_cue_strength sin ligar la clase). Instalarlo traeria
+        # la build con CUDA y sus librerias de NVIDIA -- unos 7 GB que agotaron
+        # el disco del runner en la corrida anterior -- sin sumar una sola
+        # comprobacion. Si algun dia una prueba lo necesita, fallara al
+        # importar, que es la senal correcta para revisar esta decision.
+        #
+        # Se filtra sobre requirements.txt en vez de mantener un segundo
+        # archivo, para que las versiones fijadas no se desincronicen.
         run: |
           python -m pip install --upgrade pip
-          # torch se instala desde el indice de solo CPU: la rueda con soporte
-          # CUDA pesa cerca de 2.5 GB y el runner no tiene GPU, asi que
-          # descargarla solo alargaria el trabajo sin cambiar el resultado.
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -r requirements.txt
+          grep -v '^torch==' requirements.txt > requirements-ci.txt
+          echo "Dependencias del job de pruebas:"
+          cat requirements-ci.txt
+          pip install -r requirements-ci.txt
 
       - name: Descargar modelos de spaCy
         # El enrutamiento por idioma carga el modelo espanol o el ingles segun

@@ -37,3 +37,6 @@ data/raw_dumps/
 # Configuracion de arranque local del tablero: apunta a venv/Scripts/python.exe,
 # que solo existe en Windows y en esta copia del entorno virtual.
 .claude/launch.json
+
+# Generado por el CI al filtrar torch de requirements.txt.
+requirements-ci.txt

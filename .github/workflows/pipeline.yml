@@ -65,10 +65,23 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
+      - name: Liberar espacio en disco
+        # A diferencia del job de pruebas, aqui torch si hace falta: el pipeline
+        # instancia NLPLayer y carga el modelo de sentimiento. Se instala la
+        # version exacta fijada en requirements.txt, porque este job produce los
+        # resultados que se sustentan y tiene que reproducir el entorno medido.
+        # Esa version arrastra las librerias de NVIDIA, unos 7 GB que agotaron
+        # el disco del runner. Estas herramientas preinstaladas no las usa el
+        # proyecto.
+        run: |
+          echo "Antes:"; df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/share/powershell || true
+          echo "Despues:"; df -h / | tail -1
+
       - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
           python -m spacy download es_core_news_sm
           python -m spacy download en_core_web_sm
