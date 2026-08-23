@@ -31,4 +31,5 @@ data/
 anotacion/*.xlsx
 anotacion/*.csv
 anotacion/resultados_anotacion.md
+anotacion/resultados_correlacion.md
 data/raw_dumps/

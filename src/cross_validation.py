@@ -60,6 +60,7 @@ class TrendValidator:
 
         # Initialize pytrends. We use timeout to avoid hanging requests.
         self.pytrends = TrendReq(hl='en-US', tz=360, timeout=(10, 25))
+        self._last_geo = self.geo
 
     def fetch_interest_over_time(self, keyword: str,
                                  geo: Optional[str] = None) -> Optional[pd.DataFrame]:
@@ -67,10 +68,20 @@ class TrendValidator:
         Fetches the interest over time data for a specific keyword with exponential backoff.
         Combats Pytrends aggressive rate limiting.
         """
+        target_geo = self.geo if geo is None else geo
+
+        # A TrendReq instance caches the widget token returned by Google. When a
+        # token refresh fails silently the object keeps the previous one, so the
+        # next query answers with the PREVIOUS geography's data. That produced
+        # world and Colombia figures identical to the last decimal. Starting a
+        # fresh session per geography change makes the mix-up impossible.
+        if target_geo != self._last_geo:
+            self.pytrends = TrendReq(hl='en-US', tz=360, timeout=(10, 25))
+            self._last_geo = target_geo
+
         for attempt in range(self.max_retries):
             try:
                 # We build payload exactly for the specific keyword
-                target_geo = self.geo if geo is None else geo
                 self.pytrends.build_payload([keyword], cat=0,
                                             timeframe=self.timeframe,
                                             geo=target_geo, gprop='')
@@ -249,10 +260,16 @@ class TrendValidator:
                 # local one, so the trend has not landed here yet.
                 record["adoption_gap"] = growth - local_growth
                 if trend_df is not None and local_df is not None:
-                    lag, corr = self.estimate_lag_days(
-                        trend_df[search_term], local_df[search_term])
-                    record["lag_days"] = lag
-                    record["lag_correlation"] = corr
+                    if trend_df[search_term].equals(local_df[search_term]):
+                        logger.error(
+                            "Both geographies returned an identical series for "
+                            "'%s'. The geo filter did not apply and the lag is "
+                            "meaningless; discarding it.", search_term)
+                    else:
+                        lag, corr = self.estimate_lag_days(
+                            trend_df[search_term], local_df[search_term])
+                        record["lag_days"] = lag
+                        record["lag_correlation"] = corr
                 logger.info("   %s vs %s: growth %.1f%% vs %.1f%% | gap %.1f pp | "
                             "lag %s d (r=%s)",
                             self.geo or "WORLD", self.geo_local,
