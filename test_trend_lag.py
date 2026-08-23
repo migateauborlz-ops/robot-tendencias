@@ -110,6 +110,16 @@ def test_configuracion_de_geografia():
     check("La comparacion se puede apagar", v3.compare_geos is False)
     check("La geografia de deteccion se respeta", v3.geo == "US")
 
+    # TrendReq pide una cookie a Google dentro de su constructor. Si el
+    # validador la creara al instanciarse, estas mismas comprobaciones -- que
+    # son puramente de configuracion -- dependerian de que Google responda, y
+    # en un runner de CI eso falla de forma intermitente.
+    check("Construir el validador no abre sesion con Google",
+          v.pytrends is None and v3.pytrends is None,
+          f"pytrends={v.pytrends!r}")
+    check("La geografia de la sesion arranca sin fijar",
+          v._last_geo is None, f"_last_geo={v._last_geo!r}")
+
 
 if __name__ == "__main__":
     print("=" * 68)

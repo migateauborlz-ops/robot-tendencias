@@ -1,0 +1,64 @@
+name: Pruebas
+
+# Se ejecuta en cada empuje y en cada pull request. Ninguna de las suites llama
+# a una API de pago ni a la red, asi que correrlas siempre es gratis.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pruebas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          # torch se instala desde el indice de solo CPU: la rueda con soporte
+          # CUDA pesa cerca de 2.5 GB y el runner no tiene GPU, asi que
+          # descargarla solo alargaria el trabajo sin cambiar el resultado.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Descargar modelos de spaCy
+        # El enrutamiento por idioma carga el modelo espanol o el ingles segun
+        # el texto. La capa NLP tolera que falten, pero entonces las pruebas
+        # correrian sobre una ruta degradada que no es la de produccion.
+        run: |
+          python -m spacy download es_core_news_sm
+          python -m spacy download en_core_web_sm
+
+      - name: Ejecutar las suites
+        run: python ejecutar_pruebas.py
+
+      - name: Verificar que el tablero importa
+        # Streamlit no se puede probar sin navegador, pero un error de sintaxis
+        # o un import roto si se detecta compilando el modulo.
+        run: python -m py_compile dashboard/app.py
+
+      - name: Comprobar que no se coló material raspado
+        # La politica del proyecto mantiene fuera del repositorio los
+        # comentarios raspados y los libros de anotacion. Un .gitignore se
+        # puede editar por descuido; esta verificacion lo hace visible en la
+        # revision en vez de despues del merge.
+        run: |
+          ENCONTRADO=$(git ls-files | grep -E '^(anotacion/.*\.(csv|xlsx)|data/.*)$' || true)
+          if [ -n "$ENCONTRADO" ]; then
+            echo "::error::Hay datos raspados versionados:"
+            echo "$ENCONTRADO"
+            exit 1
+          fi
+          echo "Sin datos raspados versionados."

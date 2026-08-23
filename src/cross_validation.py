@@ -58,9 +58,30 @@ class TrendValidator:
                     self.geo or "mundial", self.geo_local or "mundial",
                     "on" if self.compare_geos else "off")
 
-        # Initialize pytrends. We use timeout to avoid hanging requests.
-        self.pytrends = TrendReq(hl='en-US', tz=360, timeout=(10, 25))
-        self._last_geo = self.geo
+        # The pytrends session is created lazily. TrendReq fetches a Google
+        # cookie inside its constructor, so building a validator used to cost a
+        # network round trip even when no term was ever queried: the geography
+        # tests paid for three, and on a CI runner -- whose datacenter IP Google
+        # regularly refuses -- that turned a purely arithmetic test suite into a
+        # flaky one. Nothing here needs the session until a term is fetched.
+        self.pytrends = None
+        self._last_geo = None
+
+    def _session(self, target_geo: str) -> TrendReq:
+        """
+        Returns a pytrends session bound to `target_geo`.
+
+        A TrendReq instance caches the widget token returned by Google. When a
+        token refresh fails silently the object keeps the previous one, so the
+        next query answers with the PREVIOUS geography's data. That produced
+        world and Colombia figures identical to the last decimal. Starting a
+        fresh session whenever the geography changes makes the mix-up
+        impossible.
+        """
+        if self.pytrends is None or target_geo != self._last_geo:
+            self.pytrends = TrendReq(hl='en-US', tz=360, timeout=(10, 25))
+            self._last_geo = target_geo
+        return self.pytrends
 
     def fetch_interest_over_time(self, keyword: str,
                                  geo: Optional[str] = None) -> Optional[pd.DataFrame]:
@@ -70,27 +91,20 @@ class TrendValidator:
         """
         target_geo = self.geo if geo is None else geo
 
-        # A TrendReq instance caches the widget token returned by Google. When a
-        # token refresh fails silently the object keeps the previous one, so the
-        # next query answers with the PREVIOUS geography's data. That produced
-        # world and Colombia figures identical to the last decimal. Starting a
-        # fresh session per geography change makes the mix-up impossible.
-        if target_geo != self._last_geo:
-            self.pytrends = TrendReq(hl='en-US', tz=360, timeout=(10, 25))
-            self._last_geo = target_geo
-
         for attempt in range(self.max_retries):
             try:
+                pytrends = self._session(target_geo)
+
                 # We build payload exactly for the specific keyword
-                self.pytrends.build_payload([keyword], cat=0,
-                                            timeframe=self.timeframe,
-                                            geo=target_geo, gprop='')
-                
+                pytrends.build_payload([keyword], cat=0,
+                                       timeframe=self.timeframe,
+                                       geo=target_geo, gprop='')
+
                 # Strict 15s delay to prevent 429 Too Many Requests errors
                 logger.debug(f"Sleeping 15s before PyTrends request for '{keyword}'...")
                 time.sleep(15)
-                
-                df = self.pytrends.interest_over_time()
+
+                df = pytrends.interest_over_time()
                 
                 if df.empty:
                     logger.debug(f"Pytrends returned empty DataFrame for '{keyword}'.")
