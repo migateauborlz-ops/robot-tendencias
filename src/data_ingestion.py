@@ -6,7 +6,16 @@ from typing import List, Dict, Any, Optional, Iterable
 from datetime import datetime, timedelta, timezone
 import pandas as pd
 from apify_client import ApifyClient
-from apify_client._errors import ApifyApiError
+
+# ApifyApiError vivio en un modulo privado durante la serie 1.x y paso a uno
+# publico despues. requirements.txt fija la version validada, asi que en
+# condiciones normales solo se usa la segunda rama; el intento previo evita que
+# una instalacion sin fijar -- como la que hizo el CI la primera vez -- falle al
+# importar en vez de fallar al ejecutar, que es mucho mas dificil de leer.
+try:
+    from apify_client.errors import ApifyApiError
+except ImportError:
+    from apify_client._errors import ApifyApiError
 
 from .config import Config
 

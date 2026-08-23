@@ -19,6 +19,7 @@ from src.database import StorageAndScoring, MIN_AGE_DAYS
 
 PASSED = 0
 FAILED = 0
+SKIPPED = 0
 
 
 def check(name, condition, detail=""):
@@ -29,6 +30,20 @@ def check(name, condition, detail=""):
     else:
         FAILED += 1
         print(f"  [FALLA] {name}" + (f" -> {detail}" if detail else ""))
+
+
+def skip(motivo, comprobaciones):
+    """
+    Registra las comprobaciones que no se pudieron ejecutar.
+
+    La muestra real vive en data/raw_dumps/, que no se versiona porque contiene
+    material raspado. En CI esas comprobaciones no corren, y sin contarlas la
+    suite reportaba "todo correcto" con tres verificaciones menos: el total
+    bajaba de 130 a 127 sin que nadie lo notara.
+    """
+    global SKIPPED
+    SKIPPED += comprobaciones
+    print(f"  [OMITIDA] {motivo} ({comprobaciones} comprobaciones)")
 
 
 NOW = pd.Timestamp.now(tz="UTC")
@@ -91,7 +106,7 @@ def test_contra_muestra_real():
     print("\n3. Contraste sobre la muestra real de 30 publicaciones")
     archivos = sorted(glob.glob("data/raw_dumps/tiktok_videos_*.json"))
     if not archivos:
-        print("  (omitida: no hay muestra en data/raw_dumps)")
+        skip("no hay muestra en data/raw_dumps", 3)
         return
 
     items = json.load(open(archivos[-1], encoding="utf-8"))
@@ -105,7 +120,7 @@ def test_contra_muestra_real():
                       "timestamp": pd.to_datetime(ts, utc=True)})
     df = pd.DataFrame(filas)
     if df.empty:
-        print("  (omitida: la muestra no trae fechas)")
+        skip("la muestra no trae fechas", 3)
         return
 
     df["edad"] = (NOW - df["timestamp"]).dt.total_seconds() / 86400.0
@@ -176,6 +191,6 @@ if __name__ == "__main__":
     test_contra_muestra_real()
     test_formula_completa()
     print("\n" + "=" * 68)
-    print(f"RESULTADO: {PASSED} correctas, {FAILED} fallidas")
+    print(f"RESULTADO: {PASSED} correctas, {FAILED} fallidas, {SKIPPED} omitidas")
     print("=" * 68)
     sys.exit(1 if FAILED else 0)

@@ -85,9 +85,14 @@ jobs:
           # el inicio de un comentario y descartaria el resto de la linea. El
           # valor que llega por expansion de variable no se vuelve a analizar en
           # busca de comentarios.
-          CONSULTAS: ${{ inputs.consultas || '#TikTokMadeMeBuyIt #ProductosVirales' }}
-          ITEMS: ${{ inputs.items || '30' }}
-          TOP_N: ${{ inputs.top_n || '10' }}
+          # Se usa github.event.inputs y no el contexto `inputs`: este workflow
+          # tambien responde a `schedule`, y en esa combinacion `inputs` no es
+          # un nombre reconocido, lo que invalida el archivo entero. En una
+          # corrida programada github.event.inputs es nulo y aplica el valor
+          # por defecto.
+          CONSULTAS: ${{ github.event.inputs.consultas || '#TikTokMadeMeBuyIt #ProductosVirales' }}
+          ITEMS: ${{ github.event.inputs.items || '30' }}
+          TOP_N: ${{ github.event.inputs.top_n || '10' }}
         run: |
           mkdir -p data
           # $CONSULTAS va sin comillas a proposito: cada hashtag debe llegar

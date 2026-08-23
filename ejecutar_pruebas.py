@@ -26,11 +26,15 @@ try:
 except Exception:
     pass
 
-RESULTADO = re.compile(r"RESULTADO:\s*(\d+)\s+correctas,\s*(\d+)\s+fallidas")
+# El sufijo de omitidas es opcional: solo las suites que dependen de material
+# no versionado pueden saltarse comprobaciones.
+RESULTADO = re.compile(
+    r"RESULTADO:\s*(\d+)\s+correctas,\s*(\d+)\s+fallidas"
+    r"(?:,\s*(\d+)\s+omitidas)?")
 
 
 def ejecutar(ruta: str, detalle: bool = False):
-    """Corre una suite y devuelve (correctas, fallidas, ok, salida)."""
+    """Corre una suite y devuelve (correctas, fallidas, omitidas, ok, salida)."""
     proc = subprocess.run([sys.executable, ruta], capture_output=True,
                           text=True, encoding="utf-8", errors="replace")
     salida = (proc.stdout or "") + (proc.stderr or "")
@@ -40,11 +44,12 @@ def ejecutar(ruta: str, detalle: bool = False):
         match = m  # la ultima linea es el total de la suite
 
     if match is None:
-        return 0, 0, False, salida
+        return 0, 0, 0, False, salida
 
     correctas, fallidas = int(match.group(1)), int(match.group(2))
+    omitidas = int(match.group(3) or 0)
     ok = proc.returncode == 0 and fallidas == 0
-    return correctas, fallidas, ok, salida
+    return correctas, fallidas, omitidas, ok, salida
 
 
 def main() -> int:
@@ -62,13 +67,14 @@ def main() -> int:
     print("Suite de pruebas del robot de tendencias")
     print("=" * 72)
 
-    total_ok = total_fail = 0
+    total_ok = total_fail = total_skip = 0
     rotas = []
 
     for ruta in suites:
-        correctas, fallidas, ok, salida = ejecutar(ruta, args.detalle)
+        correctas, fallidas, omitidas, ok, salida = ejecutar(ruta, args.detalle)
         total_ok += correctas
         total_fail += fallidas
+        total_skip += omitidas
 
         if args.detalle:
             print(f"\n----- {ruta} -----")
@@ -90,12 +96,19 @@ def main() -> int:
                 print(salida.rstrip()[-1500:])
         else:
             estado = f"{correctas:3d} correctas, {fallidas} fallidas"
+            if omitidas:
+                estado += f", {omitidas} OMITIDAS"
 
         print(f"  {'OK ' if ok else 'FALLA'}  {ruta:<32} {estado}")
 
     print("\n" + "=" * 72)
     print(f"TOTAL: {total_ok} correctas, {total_fail} fallidas, "
           f"{len(suites)} suites")
+    if total_skip:
+        # Se informa aparte y en voz alta: una comprobacion omitida no es una
+        # comprobacion aprobada, y en CI la muestra raspada nunca esta.
+        print(f"OMITIDAS: {total_skip} comprobaciones no se ejecutaron "
+              f"(falta material no versionado).")
     if rotas:
         print(f"SUITES SIN RESULTADO: {', '.join(rotas)}")
     print("=" * 72)
