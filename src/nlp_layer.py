@@ -99,6 +99,12 @@ FORBIDDEN_POS = {"VERB", "AUX", "PRON", "ADV", "INTJ", "SCONJ", "CCONJ", "PART"}
 # where the second word carries a Cyrillic character.
 NON_LATIN = re.compile(r"[^\x00-\x7FÀ-ɏ\s]")
 
+# Long digit runs are phone numbers, account ids or document numbers. The
+# extractor produced "catalogo whatsap 318XXXXXXX" from a spam comment, which is
+# personal data under Ley 1581 de 2012 and must never reach the database: the
+# project commits to storing products, not identifiers.
+SECUENCIA_IDENTIFICADORA = re.compile(r"\d{7,}")
+
 class NLPLayer:
     """
     Module 2: The NLP & Intelligence Layer
@@ -215,6 +221,10 @@ class NLPLayer:
 
         # Mixed-script strings come from cross-language noise, not product names.
         if NON_LATIN.search(text):
+            return False
+
+        # Data minimisation: never let a phone number or document id through.
+        if SECUENCIA_IDENTIFICADORA.search(text):
             return False
 
         # Require real words, not punctuation or digit soup.

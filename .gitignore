@@ -24,3 +24,11 @@ data/
 .vscode/
 .idea/
 *.swp
+
+# Material de anotacion: contiene texto raspado de redes sociales, misma
+# politica que data/. Los libros se regeneran con construir_anotacion.py y se
+# comparten con el equipo por fuera del repositorio.
+anotacion/*.xlsx
+anotacion/*.csv
+anotacion/resultados_anotacion.md
+data/raw_dumps/
