@@ -16,6 +16,12 @@ Base = declarative_base()
 # would otherwise divide by ~0 and dominate the ranking on a handful of likes.
 MIN_AGE_DAYS = 0.5
 
+# Weights of the Opportunity Score. They live here as a single source of truth
+# because the reporting layer has to decompose the score back into its three
+# contributions; hardcoding them twice would let the dashboard drift away from
+# what the pipeline actually computed and misexplain the ranking.
+SCORE_WEIGHTS = {"viral": 0.4, "intent": 0.4, "trend": 0.2}
+
 
 def _opt_float(value):
     """Casts to float preserving None, so an unmeasured metric is not stored as 0."""
@@ -293,9 +299,9 @@ class StorageAndScoring:
         
         # 5. The Formula
         final_df["opportunity_score"] = (
-            (0.4 * final_df["viral_metric_score"]) + 
-            (0.4 * final_df["purchase_intent_score"]) + 
-            (0.2 * final_df["norm_trend_growth"])
+            (SCORE_WEIGHTS["viral"] * final_df["viral_metric_score"]) +
+            (SCORE_WEIGHTS["intent"] * final_df["purchase_intent_score"]) +
+            (SCORE_WEIGHTS["trend"] * final_df["norm_trend_growth"])
         )
         
         # Sort top descending

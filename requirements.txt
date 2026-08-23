@@ -9,3 +9,4 @@ SQLAlchemy
 torch
 scipy
 langdetect
+streamlit
