@@ -8,7 +8,7 @@ from src.nlp_layer import NLPLayer
 sys.stdout.reconfigure(encoding='utf-8')
 
 def run_offline_test():
-    db_path = "../data/trends.db"
+    db_path = "data/trends.db"
     
     if not os.path.exists(db_path):
         print(f"Error: Database not found at {db_path}.")

@@ -7,3 +7,5 @@ pytrends
 python-dotenv
 SQLAlchemy
 torch
+scipy
+langdetect
