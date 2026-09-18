@@ -130,6 +130,56 @@ def consenso(df: pd.DataFrame) -> pd.Series:
     return pd.Series(resultado)
 
 
+# ------------------------------------------------------------ conciliacion
+# Decisiones de la sesion de conciliacion, por hoja. Vacio si no se usa el
+# modo --conciliado.
+CONCILIADO: dict = {}
+LIBRO_CONCILIACION = CARPETA / "Conciliacion_Anotadores.xlsx"
+
+
+def cargar_conciliacion() -> dict:
+    """
+    Lee las decisiones del libro de conciliacion.
+
+    Solo alimentan el estandar de oro. El kappa se sigue calculando sobre las
+    etiquetas que cada anotador emitio por separado: recalcularlo sobre
+    decisiones tomadas en grupo mostraria acuerdo perfecto en los items
+    discutidos y subiria el valor por construccion, sin que la concordancia
+    real haya cambiado.
+    """
+    wb = load_workbook(LIBRO_CONCILIACION, data_only=True)
+    out = {}
+    for hoja in ("A_Entidades", "B_Intencion"):
+        h = wb[hoja]
+        decisiones, invalidas = {}, []
+        for fila in range(6, h.max_row + 1):
+            ident = h.cell(row=fila, column=1).value
+            if ident is None:
+                continue
+            valor = h.cell(row=fila, column=7).value
+            etq = str(valor).strip().upper() if valor is not None else ""
+            if etq in ("SI", "NO"):
+                decisiones[str(ident).strip()] = etq
+            else:
+                invalidas.append(str(ident))
+        if invalidas:
+            raise ValueError(f"{hoja}: {len(invalidas)} items sin decision SI/NO "
+                             f"({', '.join(invalidas[:5])}...). La conciliacion "
+                             f"debe resolverlos todos antes de evaluar.")
+        out[hoja] = decisiones
+    return out
+
+
+def aplicar_conciliacion(oro: pd.Series, hoja: str) -> pd.Series:
+    if not CONCILIADO:
+        return oro
+    oro = oro.copy()
+    for ident, etq in CONCILIADO[hoja].items():
+        if ident in oro.index:
+            oro[ident] = etq
+    return oro
+
+
 # ---------------------------------------------------------------- informe
 def bloque_concordancia(df: pd.DataFrame, titulo: str, lineas: list):
     lineas.append(f"\n### Concordancia — {titulo}")
@@ -159,7 +209,7 @@ def evaluar_entidades(lineas: list):
                               for c, n in anotados.items()))
     bloque_concordancia(df, "entidades", lineas)
 
-    oro = consenso(df)
+    oro = aplicar_conciliacion(consenso(df), "A_Entidades")
     resueltos = oro[oro.isin(["SI", "NO"])]
     if resueltos.empty:
         lineas.append("\nSin items resueltos por mayoria.")
@@ -195,7 +245,7 @@ def evaluar_intencion(lineas: list):
                               for c, n in anotados.items()))
     bloque_concordancia(df, "intencion de compra", lineas)
 
-    oro = consenso(df)
+    oro = aplicar_conciliacion(consenso(df), "B_Intencion")
     tabla = pd.DataFrame({"oro": oro}).join(clave[["prediccion_sistema"]], how="inner")
     tabla = tabla[tabla["oro"].isin(["SI", "NO"])]
     if tabla.empty:
@@ -250,17 +300,34 @@ def evaluar_intencion(lineas: list):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evalua la anotacion manual")
-    parser.add_argument("--salida", default="anotacion/resultados_anotacion.md")
+    parser.add_argument("--salida", default=None)
+    parser.add_argument("--conciliado", action="store_true",
+                        help="Usa las decisiones de Conciliacion_Anotadores.xlsx "
+                             "como estandar de oro. El kappa no cambia.")
     args = parser.parse_args()
+    if args.salida is None:
+        args.salida = ("anotacion/resultados_conciliados.md" if args.conciliado
+                       else "anotacion/resultados_anotacion.md")
 
     if not CARPETA.exists():
         print("No existe la carpeta anotacion/. Ejecute construir_anotacion.py.")
         return 1
 
-    lineas = ["# Resultados de la anotacion manual",
+    if args.conciliado:
+        if not LIBRO_CONCILIACION.exists():
+            print(f"No existe {LIBRO_CONCILIACION}.")
+            return 1
+        CONCILIADO.update(cargar_conciliacion())
+
+    lineas = ["# Resultados de la anotacion manual"
+              + (" — estandar de oro conciliado" if args.conciliado else ""),
               "",
               "Generado por evaluar_anotacion.py. Las metricas de esta seccion "
               "alimentan el numeral 7.4 y el capitulo 8 del documento."]
+    if args.conciliado:
+        lineas.append("\nEl estandar de oro incorpora las decisiones de la sesion "
+                      "de conciliacion. El kappa se calcula sobre las etiquetas "
+                      "independientes originales y por eso no cambia.")
     evaluar_entidades(lineas)
     evaluar_intencion(lineas)
 

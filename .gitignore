@@ -40,3 +40,6 @@ data/raw_dumps/
 
 # Generado por el CI al filtrar torch de requirements.txt.
 requirements-ci.txt
+# Informes de la conciliacion: el diagnostico cita comentarios textuales.
+anotacion/resultados_conciliados.md
+anotacion/diagnostico_concordancia.md
