@@ -8,7 +8,17 @@ Produce, en la carpeta anotacion/:
 
 Los libros no muestran la prediccion del sistema: si el anotador la viera,
 tenderia a confirmarla y las metricas quedarian infladas.
+
+Ronda 2 (--ronda 2): lee data/trends_ronda2.db, escribe en anotacion/ronda2/ y
+excluye todo lo que el equipo ya vio en la ronda 1. Se descartan las
+publicaciones de la ronda 1 y cualquier entidad o comentario ya anotado, que
+reaparecen cuando una publicacion nueva repite un producto o una frase comun.
+Si alguien anotara dos veces el mismo texto, recordaria lo que decidio antes y
+la segunda medicion del kappa dejaria de ser independiente.
+
+Sin argumentos, el script reproduce exactamente la ronda 1.
 """
+import argparse
 import json
 import random
 import sqlite3
@@ -21,7 +31,8 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
-SEMILLA = 20260822          # muestreo reproducible
+SEMILLA = 20260822          # muestreo reproducible (ronda 1)
+SEMILLA_R2 = 20260917       # ronda 2
 ANOTADORES = ["Daniela_Trujillo", "Miguel_Reina", "Gabriel_Zambrano"]
 N_NO_MARCADOS = 250         # comentarios del estrato "sin intencion segun el sistema"
 N_POSTS_RECALL = 20
@@ -33,9 +44,26 @@ AMARILLO = "FFF2CC"
 BORDE = Border(*[Side(style="thin", color="BFBFBF")] * 4)
 
 
+RONDA = 1
+BASE = "data/trends.db"
+SALIDA_DIR = Path("anotacion")
+
+
+def excluidos_ronda1():
+    """Publicaciones, entidades y comentarios que el equipo ya vio."""
+    con = sqlite3.connect("data/trends.db")
+    videos = {v for (v,) in con.execute("SELECT video_id FROM raw_social_data")}
+    con.close()
+    ent = set(pd.read_csv("anotacion/clave_maestra_entidades.csv")["entidad"]
+              .astype(str).str.strip().str.lower())
+    com = set(pd.read_csv("anotacion/clave_maestra_comentarios.csv")["comentario"]
+              .astype(str).str.strip().str.lower())
+    return videos, ent, com
+
+
 def cargar_datos():
     """Lee el corpus y arma los tres conjuntos a anotar."""
-    con = sqlite3.connect("data/trends.db")
+    con = sqlite3.connect(BASE)
 
     entidades = set()
     for (j,) in con.execute("SELECT extracted_products FROM processed_entities"):
@@ -56,6 +84,19 @@ def cargar_datos():
                 comentarios.append({"video_id": fila["video_id"], "comentario": texto})
 
     con.close()
+
+    if RONDA == 2:
+        videos, ent_vistas, com_vistos = excluidos_ronda1()
+        n0 = (len(entidades), len(comentarios), len(posts))
+        posts = posts[~posts["video_id"].isin(videos)]
+        entidades = [e for e in entidades if e.strip().lower() not in ent_vistas]
+        comentarios = [c for c in comentarios
+                       if c["video_id"] not in videos
+                       and c["comentario"].strip().lower() not in com_vistos]
+        print("Exclusion de lo ya visto en la ronda 1:")
+        print(f"  entidades   {n0[0]} -> {len(entidades)}")
+        print(f"  comentarios {n0[1]} -> {len(comentarios)}")
+        print(f"  posts       {n0[2]} -> {len(posts)}")
     return entidades, comentarios, posts
 
 
@@ -79,7 +120,7 @@ def muestrear(comentarios):
     """
     marcados = [c for c in comentarios if c["sistema"] == "SI"]
     no_marcados = [c for c in comentarios if c["sistema"] == "NO"]
-    rng = random.Random(SEMILLA)
+    rng = random.Random(SEMILLA_R2 if RONDA == 2 else SEMILLA)
     muestra_no = rng.sample(no_marcados, min(N_NO_MARCADOS, len(no_marcados)))
 
     seleccion = marcados + muestra_no
@@ -118,6 +159,22 @@ def validacion(hoja, opciones, rango):
 
 
 def construir_libro(anotador, entidades, comentarios, posts_recall):
+    if RONDA == 2:
+        dudoso_a = ("   DUDOSO   solo si el texto es ilegible, esta en un idioma que "
+                    "usted no entiende o esta cortado")
+        dudoso_b = dudoso_a
+        cierre = ("Aplique el Manual de anotacion v2. Si una regla del manual "
+                  "resuelve el caso, NO marque DUDOSO: decida SI o NO. Cuando "
+                  "marque DUDOSO, escriba en la observacion cual de las tres "
+                  "situaciones de la seccion 2 se aplica.")
+    else:
+        dudoso_a = "   DUDOSO   no lo puede decidir con la informacion disponible"
+        dudoso_b = "   DUDOSO   ambiguo o ininteligible"
+        cierre = ("Consulte el Manual de anotacion para los casos de frontera. Ante "
+                  "la duda, marque DUDOSO en vez de adivinar: esas filas se revisan "
+                  "aparte.")
+    global DUDOSO_A, DUDOSO_B, CIERRE
+    DUDOSO_A, DUDOSO_B, CIERRE = dudoso_a, dudoso_b, cierre
     wb = Workbook()
 
     # ---------------- Instrucciones ----------------
@@ -128,7 +185,8 @@ def construir_libro(anotador, entidades, comentarios, posts_recall):
     ins.column_dimensions["B"].width = 110
 
     lineas = [
-        (f"Anotacion manual del corpus — {anotador.replace('_', ' ')}", "titulo"),
+        (f"Anotacion manual del corpus — {anotador.replace('_', ' ')}"
+         + (" — Ronda 2" if RONDA == 2 else ""), "titulo"),
         ("", None),
         ("Este libro tiene tres tareas. Complete solo las celdas amarillas.", "normal"),
         ("Trabaje solo: no consulte con los demas anotadores hasta que los tres "
@@ -140,22 +198,21 @@ def construir_libro(anotador, entidades, comentarios, posts_recall):
          "fisico que una PYME podria comprar y revender?", "normal"),
         ("   SI       es un producto o una categoria concreta de producto", "normal"),
         ("   NO       no lo es (frases, lugares, saludos, conceptos abstractos)", "normal"),
-        ("   DUDOSO   no lo puede decidir con la informacion disponible", "normal"),
+        (DUDOSO_A, "normal"),
         ("", None),
         ("Tarea B — Intencion de compra  (hoja B_Intencion)", "sub"),
         ("Para cada comentario, responda: ¿expresa que la persona quiere adquirir "
          "el producto?", "normal"),
         ("   SI       pregunta precio, pide el link, dice que lo quiere o ya lo pidio", "normal"),
         ("   NO       elogia, comenta, bromea o critica, sin querer comprarlo", "normal"),
-        ("   DUDOSO   ambiguo o ininteligible", "normal"),
+        (DUDOSO_B, "normal"),
         ("", None),
         ("Tarea C — Productos por publicacion  (hoja C_Recall)  [opcional]", "sub"),
         ("Lea el texto de la publicacion y escriba los productos que usted "
          "reconoce, separados por punto y coma. Sirve para medir lo que el "
          "sistema deja pasar.", "normal"),
         ("", None),
-        ("Consulte el Manual de anotacion para los casos de frontera. Ante la "
-         "duda, marque DUDOSO en vez de adivinar: esas filas se revisan aparte.", "normal"),
+        (CIERRE, "normal"),
     ]
     fila = 2
     for texto, estilo in lineas:
@@ -251,13 +308,24 @@ def construir_libro(anotador, entidades, comentarios, posts_recall):
         for col in range(1, 4):
             hc.cell(row=f, column=col).border = BORDE
 
-    salida = Path("anotacion") / f"Anotacion_{anotador}.xlsx"
+    salida = SALIDA_DIR / f"Anotacion_{anotador}.xlsx"
     wb.save(salida)
     return salida
 
 
 def main() -> int:
-    Path("anotacion").mkdir(exist_ok=True)
+    global RONDA, BASE, SALIDA_DIR
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ronda", type=int, choices=(1, 2), default=1)
+    args = parser.parse_args()
+    if args.ronda == 2:
+        RONDA, BASE, SALIDA_DIR = 2, "data/trends_ronda2.db", Path("anotacion/ronda2")
+        # La ronda 1 debe quedar intacta: se verifica antes de escribir nada.
+        for f in ("clave_maestra_entidades.csv", "clave_maestra_comentarios.csv"):
+            if not (Path("anotacion") / f).exists():
+                print(f"Falta anotacion/{f}; sin ella no se puede excluir la ronda 1.")
+                return 1
+    SALIDA_DIR.mkdir(parents=True, exist_ok=True)
 
     entidades, comentarios, posts = cargar_datos()
     print(f"Entidades a anotar : {len(entidades)}")
@@ -278,22 +346,22 @@ def main() -> int:
         {"id": f"B{i+1:03d}", "video_id": c["video_id"],
          "comentario": c["comentario"], "prediccion_sistema": c["sistema"]}
         for i, c in enumerate(muestra)])
-    clave.to_csv("anotacion/clave_maestra_comentarios.csv", index=False,
+    clave.to_csv(SALIDA_DIR / "clave_maestra_comentarios.csv", index=False,
                  encoding="utf-8-sig")
     pd.DataFrame({"id": [f"A{i+1:03d}" for i in range(len(entidades))],
                   "entidad": entidades}).to_csv(
-        "anotacion/clave_maestra_entidades.csv", index=False, encoding="utf-8-sig")
+        SALIDA_DIR / "clave_maestra_entidades.csv", index=False, encoding="utf-8-sig")
     pd.DataFrame({"estrato": ["marcados", "no_marcados"],
                   "poblacion": [n_si, n_no],
                   "muestreados": [n_si, n_muestra_no]}).to_csv(
-        "anotacion/estratos.csv", index=False, encoding="utf-8-sig")
+        SALIDA_DIR / "estratos.csv", index=False, encoding="utf-8-sig")
 
     print()
     for anotador in ANOTADORES:
         ruta = construir_libro(anotador, entidades, muestra, posts_recall)
         print(f"  generado: {ruta}")
 
-    print("\nClaves maestras en anotacion/clave_maestra_*.csv "
+    print(f"\nClaves maestras en {SALIDA_DIR}/clave_maestra_*.csv "
           "(no compartir hasta cerrar la anotacion).")
     return 0
 

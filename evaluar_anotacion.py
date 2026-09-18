@@ -170,13 +170,33 @@ def cargar_conciliacion() -> dict:
     return out
 
 
+ENMIENDAS = CARPETA / "enmiendas_manual_v2.csv"
+
+
 def aplicar_conciliacion(oro: pd.Series, hoja: str) -> pd.Series:
+    """
+    Aplica al estandar de oro las decisiones conciliadas y, despues, las
+    enmiendas derivadas de las reglas del manual v2.
+
+    Las enmiendas se guardan en un archivo aparte, y no editando el libro de
+    conciliacion, para que cada cambio posterior a la sesion quede registrado
+    con su regla y se pueda auditar.
+    """
     if not CONCILIADO:
         return oro
     oro = oro.copy()
     for ident, etq in CONCILIADO[hoja].items():
         if ident in oro.index:
             oro[ident] = etq
+    if ENMIENDAS.exists():
+        enm = pd.read_csv(ENMIENDAS)
+        for _, fila in enm[enm["tarea"] == hoja].iterrows():
+            if fila["id"] in oro.index:
+                if oro[fila["id"]] != fila["antes"]:
+                    raise ValueError(f"Enmienda {fila['id']}: se esperaba "
+                                     f"{fila['antes']} y el estandar tiene "
+                                     f"{oro[fila['id']]}.")
+                oro[fila["id"]] = fila["despues"]
     return oro
 
 
@@ -301,13 +321,22 @@ def evaluar_intencion(lineas: list):
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evalua la anotacion manual")
     parser.add_argument("--salida", default=None)
+    parser.add_argument("--ronda", type=int, choices=(1, 2), default=1,
+                        help="2 lee anotacion/ronda2/, anotada con el manual v2.")
     parser.add_argument("--conciliado", action="store_true",
                         help="Usa las decisiones de Conciliacion_Anotadores.xlsx "
                              "como estandar de oro. El kappa no cambia.")
     args = parser.parse_args()
+    global CARPETA, LIBRO_CONCILIACION, ENMIENDAS
+    if args.ronda == 2:
+        # Cada ronda tiene sus propios libros, claves y estratos. Las enmiendas
+        # de la ronda 1 no se aplican: la ronda 2 ya se anoto con las reglas v2.
+        CARPETA = Path("anotacion/ronda2")
+        LIBRO_CONCILIACION = CARPETA / "Conciliacion_Anotadores.xlsx"
+        ENMIENDAS = CARPETA / "enmiendas.csv"
     if args.salida is None:
-        args.salida = ("anotacion/resultados_conciliados.md" if args.conciliado
-                       else "anotacion/resultados_anotacion.md")
+        args.salida = str(CARPETA / ("resultados_conciliados.md" if args.conciliado
+                                     else "resultados_anotacion.md"))
 
     if not CARPETA.exists():
         print("No existe la carpeta anotacion/. Ejecute construir_anotacion.py.")

@@ -43,3 +43,9 @@ requirements-ci.txt
 # Informes de la conciliacion: el diagnostico cita comentarios textuales.
 anotacion/resultados_conciliados.md
 anotacion/diagnostico_concordancia.md
+# Ronda 2 de anotacion: mismas reglas que la ronda 1. Los libros, las claves y
+# los informes contienen texto extraido de redes sociales.
+anotacion/ronda2/*.xlsx
+anotacion/ronda2/*.csv
+anotacion/ronda2/*.md
+corrida_ronda2.out
