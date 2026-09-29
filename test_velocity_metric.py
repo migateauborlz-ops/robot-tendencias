@@ -144,12 +144,22 @@ def test_contra_muestra_real():
     check("El top 5 por velocidad es en promedio mas reciente",
           edad_media_top5_vel < edad_media_top5_likes)
 
-    dentro = int((df["edad"] <= Config.INGESTION_WINDOW_DAYS).sum())
+    # La ventana se contrasta contra la publicacion mas reciente de la muestra
+    # y no contra el reloj. Con el reloj la comprobacion caducaba: la muestra
+    # se descargo el 2026-08-20 y, pasado un mes, ninguna publicacion entraba
+    # ni en la ventana de 30 dias ni en la de 7, de modo que la condicion
+    # comparaba 0 con 0 y fallaba sin que nada se hubiera roto. Lo que aqui se
+    # verifica es la logica de la ventana, que no depende de la fecha de
+    # ejecucion.
+    referencia = df["timestamp"].max()
+    edad_rel = (referencia - df["timestamp"]).dt.total_seconds() / 86400.0
+    dentro = int((edad_rel <= Config.INGESTION_WINDOW_DAYS).sum())
+    dentro_7 = int((edad_rel <= 7).sum())
     print(f"  Publicaciones dentro de la ventana de {Config.INGESTION_WINDOW_DAYS} dias: "
-          f"{dentro} de {len(df)}")
+          f"{dentro} de {len(df)} (medidas desde la mas reciente de la muestra)")
     check("La ventana de 30 dias admite mas publicaciones que la de 7",
-          dentro > int((df["edad"] <= 7).sum()),
-          f"{dentro} vs {int((df['edad'] <= 7).sum())}")
+          dentro > dentro_7,
+          f"{dentro} vs {dentro_7}")
 
 
 def test_formula_completa():
