@@ -1,0 +1,165 @@
+name: Pipeline de deteccion
+
+# Orquestacion del robot (OE4).
+#
+# A diferencia de las pruebas, esta ejecucion CUESTA DINERO: consume creditos
+# de Apify por cada publicacion raspada. Por eso el disparo programado esta
+# desactivado de fabrica: la corrida semanal solo ocurre si en el repositorio
+# existe la variable EJECUCION_PROGRAMADA con valor 'true'
+# (Settings > Secrets and variables > Actions > Variables). La ejecucion
+# manual, en cambio, siempre esta disponible.
+on:
+  workflow_dispatch:
+    inputs:
+      consultas:
+        description: 'Hashtags a rastrear, separados por espacios'
+        required: false
+        default: '#TikTokMadeMeBuyIt #ProductosVirales'
+      items:
+        description: 'Publicaciones por consulta (controla el costo)'
+        required: false
+        default: '30'
+      top_n:
+        description: 'Productos a guardar'
+        required: false
+        default: '10'
+  schedule:
+    # Lunes 06:00 UTC = 01:00 en Bogota.
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  ejecutar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    # La ejecucion manual siempre procede. La programada requiere que el equipo
+    # haya activado explicitamente la variable, para que nadie descubra el
+    # consumo de creditos despues del hecho.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      vars.EJECUCION_PROGRAMADA == 'true'
+
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Verificar que el token existe
+        # Sin esta comprobacion el pipeline arranca, raspa cero publicaciones y
+        # termina "sin errores", que es la falla mas dificil de diagnosticar.
+        env:
+          APIFY_API_TOKEN: ${{ secrets.APIFY_API_TOKEN }}
+        run: |
+          if [ -z "$APIFY_API_TOKEN" ]; then
+            echo "::error::Falta el secreto APIFY_API_TOKEN."
+            exit 1
+          fi
+          echo "Token presente."
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Liberar espacio en disco
+        # A diferencia del job de pruebas, aqui torch si hace falta: el pipeline
+        # instancia NLPLayer y carga el modelo de sentimiento. Se instala la
+        # version exacta fijada en requirements.txt, porque este job produce los
+        # resultados que se sustentan y tiene que reproducir el entorno medido.
+        # Esa version arrastra las librerias de NVIDIA, unos 7 GB que agotaron
+        # el disco del runner. Estas herramientas preinstaladas no las usa el
+        # proyecto.
+        run: |
+          echo "Antes:"; df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/share/powershell || true
+          echo "Despues:"; df -h / | tail -1
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m spacy download es_core_news_sm
+          python -m spacy download en_core_web_sm
+
+      - name: Ejecutar el pipeline
+        env:
+          APIFY_API_TOKEN: ${{ secrets.APIFY_API_TOKEN }}
+          DB_PATH: sqlite:///data/trends.db
+          PYTHONIOENCODING: utf-8
+          # Las entradas del formulario se pasan por el entorno, nunca
+          # interpoladas con ${{ }} dentro del script. Por dos razones:
+          # interpolarlas inyecta texto arbitrario en el shell, y ademas
+          # romperia la ejecucion, porque bash leeria el '#' de un hashtag como
+          # el inicio de un comentario y descartaria el resto de la linea. El
+          # valor que llega por expansion de variable no se vuelve a analizar en
+          # busca de comentarios.
+          # En una corrida programada github.event.inputs es nulo y aplica el
+          # valor por defecto.
+          #
+          # El valor va entre comillas dobles y esto NO es opcional. Sin ellas
+          # YAML lee la linea como escalar plano, donde un ' #' inicia un
+          # comentario: el segundo hashtag va precedido de espacio, asi que el
+          # resto de la linea desaparecia y la expresion quedaba como
+          # "${{ github.event.inputs.consultas || '#TikTokMadeMeBuyIt", sin
+          # cerrar. GitHub rechazaba el archivo entero. El fallo es silencioso
+          # para un validador de YAML porque el documento sigue siendo valido;
+          # solo el valor queda truncado.
+          CONSULTAS: "${{ github.event.inputs.consultas || '#TikTokMadeMeBuyIt #ProductosVirales' }}"
+          ITEMS: "${{ github.event.inputs.items || '30' }}"
+          TOP_N: "${{ github.event.inputs.top_n || '10' }}"
+        run: |
+          mkdir -p data
+          # $CONSULTAS va sin comillas a proposito: cada hashtag debe llegar
+          # como un argumento separado de --queries.
+          python main.py \
+            --queries $CONSULTAS \
+            --items "$ITEMS" \
+            --top_n "$TOP_N"
+
+      - name: Exportar resultados
+        if: always()
+        env:
+          DB_PATH: sqlite:///data/trends.db
+        run: python exportar_resultados.py --salida resultados.csv
+
+      - name: Resumen de la corrida
+        if: always()
+        run: |
+          {
+            echo "## Resultado de la deteccion"
+            echo ""
+            if [ -s resultados.csv ]; then
+              echo '```'
+              head -20 resultados.csv
+              echo '```'
+            else
+              echo "No se genero ningun resultado."
+            fi
+            echo ""
+            echo "### Ultimas lineas del log"
+            echo '```'
+            tail -25 pipeline.log 2>/dev/null || echo "sin log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publicar resultados
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultados-${{ github.run_number }}
+          # Se publican el CSV y el log, NUNCA data/trends.db. La base incluye
+          # la tabla raw_social_data, con comentarios raspados y los
+          # identificadores de las publicaciones de las que salieron; subirla
+          # como artefacto trasladaria esos datos personales al almacenamiento
+          # de GitHub. El log solo registra conteos y nombres de producto, y el
+          # CSV solo metricas agregadas.
+          path: |
+            resultados.csv
+            pipeline.log
+          retention-days: 14
+          if-no-files-found: warn

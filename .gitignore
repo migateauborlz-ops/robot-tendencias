@@ -24,3 +24,28 @@ data/
 .vscode/
 .idea/
 *.swp
+
+# Material de anotacion: contiene texto raspado de redes sociales, misma
+# politica que data/. Los libros se regeneran con construir_anotacion.py y se
+# comparten con el equipo por fuera del repositorio.
+anotacion/*.xlsx
+anotacion/*.csv
+anotacion/resultados_anotacion.md
+anotacion/resultados_correlacion.md
+data/raw_dumps/
+
+# Configuracion de arranque local del tablero: apunta a venv/Scripts/python.exe,
+# que solo existe en Windows y en esta copia del entorno virtual.
+.claude/launch.json
+
+# Generado por el CI al filtrar torch de requirements.txt.
+requirements-ci.txt
+# Informes de la conciliacion: el diagnostico cita comentarios textuales.
+anotacion/resultados_conciliados.md
+anotacion/diagnostico_concordancia.md
+# Ronda 2 de anotacion: mismas reglas que la ronda 1. Los libros, las claves y
+# los informes contienen texto extraido de redes sociales.
+anotacion/ronda2/*.xlsx
+anotacion/ronda2/*.csv
+anotacion/ronda2/*.md
+corrida_ronda2.out

@@ -1,7 +1,15 @@
 import logging
 import argparse
+import sys
 from datetime import datetime
 import pandas as pd
+
+# The Windows console defaults to cp1252 and the final report prints emoji, which
+# crashed the run AFTER the results had already been written to the database.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 from src.config import Config
 from src.data_ingestion import DataIngestion
@@ -21,7 +29,9 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-def run_pipeline(queries: list[str], max_items: int = 10, top_n_save: int = 10):
+def run_pipeline(queries: list[str], max_items: int = 10, top_n_save: int = 10,
+                 geo: str = None, geo_local: str = None,
+                 compare_geos: bool = None):
     """
     Executes the full Social Commerce Trend Detection Pipeline.
     
@@ -62,14 +72,11 @@ def run_pipeline(queries: list[str], max_items: int = 10, top_n_save: int = 10):
         
     store.save_processed_entities(df_processed)
     
-    # Collate all unique products extracted for the validation step
-    all_products = set()
-    for products in df_processed["extracted_products"].dropna():
-        for product in products:
-            if isinstance(product, str) and len(product) > 2:
-                all_products.add(product.lower())
-                
-    logger.info(f"-> Extracted {len(all_products)} unique product entities.")
+    # Candidate preselection lives in StorageAndScoring so that main.py and
+    # reprocess_offline.py cannot drift apart in how they rank entities.
+    all_products = StorageAndScoring.select_candidates(df_processed, limit=5)
+
+    logger.info(f"-> Sliced to {len(all_products)} top candidate products for validation.")
     
     if not all_products:
         logger.warning("Pipeline halted: No product entities were extracted.")
@@ -79,7 +86,8 @@ def run_pipeline(queries: list[str], max_items: int = 10, top_n_save: int = 10):
     # Module 3: Cross-Validation Layer (Google Trends)
     # ---------------------------------------------------------
     logger.info("-> Starting Google Trends Validation...")
-    validator = TrendValidator()
+    validator = TrendValidator(geo=geo, geo_local=geo_local,
+                               compare_geos=compare_geos)
     df_validation = validator.validate_products(list(all_products))
     
     if df_validation.empty:
@@ -115,16 +123,27 @@ def run_pipeline(queries: list[str], max_items: int = 10, top_n_save: int = 10):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Social Commerce Trend Detection Bot")
-    parser.add_argument("--queries", nargs="+", default=["#TikTokMadeMeBuyIt", "#AmazonFinds", "#ViralProduct"], 
+    parser.add_argument("--queries", nargs="+", default=["#TikTokMadeMeBuyItColombia", "#ProductosVirales", "#ComprasColombia"], 
                         help="List of hashtags or search queries to run the scraper on.")
     parser.add_argument("--items", type=int, default=5, 
                         help="Maximum number of posts to scrape per query (default 5 for testing).")
     parser.add_argument("--top_n", type=int, default=10, 
                         help="Number of top trends to save and display.")
+    parser.add_argument("--geo", default=None,
+                        help="Mercado de deteccion en Google Trends. Cadena vacia = "
+                             "mundial. Por defecto Config.TRENDS_GEO.")
+    parser.add_argument("--geo-local", dest="geo_local", default=None,
+                        help="Mercado objetivo contra el que se mide el rezago "
+                             "(por defecto CO).")
+    parser.add_argument("--no-compare-geos", dest="compare_geos",
+                        action="store_false", default=None,
+                        help="Valida solo en el mercado de deteccion, sin medir rezago.")
                         
     args = parser.parse_args()
     
     try:
-        run_pipeline(args.queries, max_items=args.items, top_n_save=args.top_n)
+        run_pipeline(args.queries, max_items=args.items, top_n_save=args.top_n,
+                     geo=args.geo, geo_local=args.geo_local,
+                     compare_geos=args.compare_geos)
     except KeyboardInterrupt:
         print("\nPipeline execution halted by user.")

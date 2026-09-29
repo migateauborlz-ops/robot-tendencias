@@ -1,6 +1,7 @@
 import os
 import logging
 from datetime import datetime, timezone
+import numpy as np
 import pandas as pd
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, JSON
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -10,6 +11,31 @@ from .config import Config
 logger = logging.getLogger(__name__)
 
 Base = declarative_base()
+
+# Floor on post age when computing velocity: a post published minutes ago
+# would otherwise divide by ~0 and dominate the ranking on a handful of likes.
+MIN_AGE_DAYS = 0.5
+
+# Weights of the Opportunity Score. They live here as a single source of truth
+# because the reporting layer has to decompose the score back into its three
+# contributions; hardcoding them twice would let the dashboard drift away from
+# what the pipeline actually computed and misexplain the ranking.
+SCORE_WEIGHTS = {"viral": 0.4, "intent": 0.4, "trend": 0.2}
+
+
+def _opt_float(value):
+    """Casts to float preserving None, so an unmeasured metric is not stored as 0."""
+    try:
+        return None if value is None or pd.isna(value) else float(value)
+    except Exception:
+        return None
+
+
+def _opt_int(value):
+    try:
+        return None if value is None or pd.isna(value) else int(value)
+    except Exception:
+        return None
 
 # --- Database Schema ---
 
@@ -45,9 +71,15 @@ class FinalTrends(Base):
     
     id = Column(Integer, primary_key=True)
     product_name = Column(String(100), index=True)
+    engagement_velocity = Column(Float)   # interacciones por dia
     viral_metric_score = Column(Float)
     purchase_intent_score = Column(Float)
-    google_trend_growth_pct = Column(Float)
+    google_trend_growth_pct = Column(Float)      # mercado de deteccion
+    trend_geo = Column(String(10))               # geografia de deteccion
+    trend_growth_local = Column(Float)           # mismo termino en el mercado local
+    adoption_gap = Column(Float)                 # deteccion - local, en puntos
+    lag_days = Column(Integer)                   # rezago estimado del mercado local
+    lag_correlation = Column(Float)              # correlacion en ese rezago
     opportunity_score = Column(Float, index=True)
     validated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
@@ -101,70 +133,175 @@ class StorageAndScoring:
             
         with self.Session() as session:
             for _, row in df.iterrows():
-                new_record = ProcessedEntities(
-                    video_id=row.get('video_id'),
-                    extracted_products=row.get('extracted_products', []),
-                    purchase_intent_score=float(row.get('purchase_intent_score') or 0.0),
-                    high_intent_comments_count=int(row.get('high_intent_comments_count') or 0)
-                )
-                session.add(new_record)
+                existing = session.query(ProcessedEntities).filter_by(video_id=row.get('video_id')).first()
+                if existing:
+                    existing.extracted_products = row.get('extracted_products', [])
+                    existing.purchase_intent_score = float(row.get('purchase_intent_score') or 0.0)
+                    existing.high_intent_comments_count = int(row.get('high_intent_comments_count') or 0)
+                    existing.processed_at = datetime.now(timezone.utc)
+                else:
+                    new_record = ProcessedEntities(
+                        video_id=row.get('video_id'),
+                        extracted_products=row.get('extracted_products', []),
+                        purchase_intent_score=float(row.get('purchase_intent_score') or 0.0),
+                        high_intent_comments_count=int(row.get('high_intent_comments_count') or 0)
+                    )
+                    session.add(new_record)
             session.commit()
             logger.info("Processed entities saved to database.")
+
+    @staticmethod
+    def _engagement_velocity(row, now: pd.Timestamp) -> float:
+        """
+        Engagement accumulated per day since the post was published.
+
+        A post with 16 likes in two days is growing faster than one with 300,000
+        likes over four years; accumulated counts cannot tell them apart.
+        """
+        published = None
+        try:
+            raw_ts = row.get("timestamp")
+            if raw_ts is not None and not pd.isna(raw_ts):
+                published = pd.to_datetime(raw_ts, utc=True)
+        except Exception:
+            published = None
+
+        if published is None:
+            # Without a date we cannot compute a rate. Assume the oldest post the
+            # window admits, which penalises rather than rewards the unknown.
+            age_days = float(Config.INGESTION_WINDOW_DAYS)
+        else:
+            age_days = (now - published).total_seconds() / 86400.0
+            age_days = max(age_days, MIN_AGE_DAYS)
+
+        engagement = float(row.get("likes_count") or 0) + float(row.get("shares_count") or 0)
+        return engagement / age_days
+
+    @staticmethod
+    def _normalize_velocity(velocities: pd.Series) -> pd.Series:
+        """
+        Maps engagement velocity to the 0-1 range used by the Opportunity Score.
+
+        Engagement on social platforms is heavy-tailed: a plain min-max division
+        would collapse every product except the single fastest to nearly zero. A
+        log transform stabilises the variance first, which is the standard
+        treatment for this kind of distribution.
+        """
+        v = pd.to_numeric(velocities, errors="coerce").fillna(0.0).clip(lower=0.0)
+        log_v = np.log1p(v)
+        max_log = log_v.max()
+        if not max_log or max_log <= 0:
+            return pd.Series([0.0] * len(v), index=v.index)
+        return (log_v / max_log).clip(upper=1.0)
+
+    @classmethod
+    def select_candidates(cls, df_nlp: pd.DataFrame, limit: int = 5) -> list:
+        """
+        Picks the entities worth spending a Google Trends query on.
+
+        Trends is rate limited, so only a handful of candidates can be validated
+        per run and the choice matters. Raw velocity cannot be used directly: it
+        reaches six figures while intent tops out at 1.0, so every entity coming
+        from the same viral post tied at the same score regardless of quality.
+        Velocity is therefore normalised before being combined, and the number of
+        distinct posts mentioning an entity is added as evidence of a real trend.
+        """
+        if df_nlp is None or df_nlp.empty:
+            return []
+
+        now = pd.Timestamp.now(tz="UTC")
+        rows = []
+        for _, row in df_nlp.iterrows():
+            velocity = cls._engagement_velocity(row, now)
+            intent = float(row.get("purchase_intent_score") or 0.0)
+            for product in (row.get("extracted_products") or []):
+                if isinstance(product, str) and len(product) > 2:
+                    rows.append({"product_name": product.lower(),
+                                 "velocity": velocity, "intent": intent})
+
+        if not rows:
+            return []
+
+        df = pd.DataFrame(rows)
+        agg = df.groupby("product_name").agg(
+            velocity=("velocity", "sum"),
+            intent=("intent", "mean"),
+            mentions=("product_name", "size"),
+        ).reset_index()
+
+        agg["norm_velocity"] = cls._normalize_velocity(agg["velocity"])
+        # Mentions are capped: appearing in three posts is already strong evidence,
+        # and beyond that the signal should not outweigh intent.
+        agg["norm_mentions"] = (agg["mentions"] / 3.0).clip(upper=1.0)
+        agg["proxy"] = (0.4 * agg["norm_velocity"]
+                        + 0.4 * agg["intent"]
+                        + 0.2 * agg["norm_mentions"])
+
+        agg = agg.sort_values("proxy", ascending=False)
+        return agg["product_name"].head(limit).tolist()
 
     def calculate_opportunity_score(self, df_nlp: pd.DataFrame, df_validation: pd.DataFrame) -> pd.DataFrame:
         """
         Calculates the final Opportunity Score for validated products.
         Formula: Score = (0.4 * Viral_Metric) + (0.4 * Purchase_Intent_Score) + (0.2 * Google_Trend_Growth)
+        where Viral_Metric is now derived from engagement VELOCITY (interactions
+        per day since publication), not from accumulated likes.
         """
         if df_validation.empty or df_nlp.empty:
             return pd.DataFrame()
             
+        now = pd.Timestamp.now(tz="UTC")
+
         # 1. Flatten NLP DataFrame to Product level (many-to-many relationship)
         # We need to calculate aggregate metrics per unique product extracted
         product_metrics = []
         for _, row in df_nlp.iterrows():
             products = row.get("extracted_products", [])
+            velocity = self._engagement_velocity(row, now)
             for p in products:
                 product_metrics.append({
                     "product_name": p,
                     "likes_count": row.get("likes_count", 0),
                     "shares_count": row.get("shares_count", 0),
+                    "engagement_velocity": velocity,
                     "purchase_intent_score": row.get("purchase_intent_score", 0.0)
                 })
-        
+
         df_product_level = pd.DataFrame(product_metrics)
         if df_product_level.empty:
             return pd.DataFrame()
-            
+
         # Group by product and average/sum metrics
         df_agg = df_product_level.groupby("product_name").agg({
             "likes_count": "sum",
             "shares_count": "sum",
+            "engagement_velocity": "sum",
             "purchase_intent_score": "mean"
         }).reset_index()
-        
+
         # 2. Merge with Validation Metrics (Google Trends)
         final_df = pd.merge(df_validation, df_agg, on="product_name", how="inner")
-        
+
         if final_df.empty:
             return pd.DataFrame()
-            
-        # 3. Calculate Viral Metric (Normalize likes out of ~500k scale for 0-1 range approx)
-        # In a real system, this normalization scale should be dynamic based on the dataset
-        max_likes_observed = final_df["likes_count"].max() or 1
-        final_df["viral_metric_score"] = final_df["likes_count"] / max_likes_observed
-        # Cap at 1.0 just in case
-        final_df["viral_metric_score"] = final_df["viral_metric_score"].clip(upper=1.0)
-        
+
+        # 3. Calculate the Viral Metric from engagement VELOCITY, not accumulated
+        # likes. Measured on 2026-08-20 over a 30-post hashtag sample, accumulated
+        # likes rank four-year-old posts above everything else (8.4M likes at 1,518
+        # days), which is the opposite of early detection. Dividing engagement by
+        # the age of the post surfaces what is growing now.
+        final_df["viral_metric_score"] = self._normalize_velocity(
+            final_df["engagement_velocity"])
+
         # 4. Normalize Google Trend Growth (Cap exorbitant growths like 500% to 1.0)
         # Anything above 100% growth (1.0) gets max score.
         final_df["norm_trend_growth"] = final_df["trend_growth"].clip(lower=0.0, upper=1.0)
         
         # 5. The Formula
         final_df["opportunity_score"] = (
-            (0.4 * final_df["viral_metric_score"]) + 
-            (0.4 * final_df["purchase_intent_score"]) + 
-            (0.2 * final_df["norm_trend_growth"])
+            (SCORE_WEIGHTS["viral"] * final_df["viral_metric_score"]) +
+            (SCORE_WEIGHTS["intent"] * final_df["purchase_intent_score"]) +
+            (SCORE_WEIGHTS["trend"] * final_df["norm_trend_growth"])
         )
         
         # Sort top descending
@@ -183,6 +320,12 @@ class StorageAndScoring:
                 # Avoid duplicates across runs, update or insert (Upsert)
                 existing = session.query(FinalTrends).filter_by(product_name=row['product_name']).first()
                 if existing:
+                    existing.trend_geo = row.get('trend_geo')
+                    existing.trend_growth_local = _opt_float(row.get('trend_growth_local'))
+                    existing.adoption_gap = _opt_float(row.get('adoption_gap'))
+                    existing.lag_days = _opt_int(row.get('lag_days'))
+                    existing.lag_correlation = _opt_float(row.get('lag_correlation'))
+                    existing.engagement_velocity = float(row.get('engagement_velocity', 0))
                     existing.viral_metric_score = float(row.get('viral_metric_score', 0))
                     existing.purchase_intent_score = float(row.get('purchase_intent_score', 0))
                     existing.google_trend_growth_pct = float(row.get('trend_growth', 0))
@@ -191,6 +334,12 @@ class StorageAndScoring:
                 else:
                     new_record = FinalTrends(
                         product_name=row['product_name'],
+                        trend_geo=row.get('trend_geo'),
+                        trend_growth_local=_opt_float(row.get('trend_growth_local')),
+                        adoption_gap=_opt_float(row.get('adoption_gap')),
+                        lag_days=_opt_int(row.get('lag_days')),
+                        lag_correlation=_opt_float(row.get('lag_correlation')),
+                        engagement_velocity=float(row.get('engagement_velocity', 0)),
                         viral_metric_score=float(row.get('viral_metric_score', 0)),
                         purchase_intent_score=float(row.get('purchase_intent_score', 0)),
                         google_trend_growth_pct=float(row.get('trend_growth', 0)),
